@@ -2,9 +2,9 @@
 
 An embedded-system prototype that sorts boxes by **color, weight, and damage status**.
 
-The Arduino UNO R3 controls the conveyor, sensors, motors, and servo mechanisms. An ODROID-C4 processes images from a webcam using a TensorFlow Lite classification model and sends the damage result to the Arduino through GPIO.
+The Arduino UNO R3 controls the conveyor, sensors, motors, and servo mechanisms. An ODROID-C4 processes webcam images using a TensorFlow Lite model and sends the damage result to the Arduino through GPIO.
 
-The prototype processes **one box per sorting cycle**. A new box should be placed on the conveyor only after the previous box has been completely sorted.
+The prototype processes **one box per sorting cycle**. The next box should be placed on the conveyor only after the current box has been completely sorted.
 
 ---
 
@@ -14,11 +14,11 @@ The prototype processes **one box per sorting cycle**. A new box should be place
 flowchart LR
     Box[Box Enters Conveyor] --> IR[IR Sensors]
     Box --> Color[TCS34725 Color Sensor]
-    Box --> Weight[Load Cell + HX711]
     Box --> Camera[720p Web Camera]
+    Box --> Weight[Load Cell + HX711]
 
     Camera --> ODROID[ODROID-C4<br/>Python + TensorFlow Lite]
-    ODROID -->|Damage Signal through GPIO| Arduino[Arduino UNO R3]
+    ODROID -->|Damage Result through GPIO| Arduino[Arduino UNO R3]
 
     IR --> Arduino
     Color --> Arduino
@@ -28,7 +28,7 @@ flowchart LR
     Arduino --> Servos[5 SG90 Servo Motors]
 
     Motors --> Move[Move Box Along Conveyor]
-    Servos --> Actuate[Switch Lane or Push Box]
+    Servos --> Sort[Switch Lane or Push Box]
 ```
 
 ---
@@ -36,33 +36,36 @@ flowchart LR
 ## How the System Works
 
 1. **Entry detection**  
-   The first IR sensor detects a box entering the conveyor. This sensor is handled through an interrupt and can wake the Arduino from power-down sleep mode.
+   The first IR sensor detects a box entering the conveyor. It is handled through an interrupt and can wake the Arduino from power-down sleep mode.
 
-2. **Color and weight measurement**  
-   The Arduino reads the box color using a TCS34725 sensor and measures its weight using a 1 kg Load Cell with an HX711 module.
+2. **Color detection and damage inspection**  
+   The color sensor and AI inspection operate during the same inspection stage:
+   - The TCS34725 sensor reads the box color.
+   - The webcam captures an image of the box.
+   - The ODROID-C4 classifies the box as `good` or `damage`.
 
-3. **Damage classification**  
-   A webcam captures the box image. The ODROID-C4 runs a TensorFlow Lite model to classify the box as `good` or `damage`.
-
-4. **GPIO communication**  
-   The ODROID-C4 sends the classification result to the Arduino through GPIO:
+3. **GPIO communication**  
+   The ODROID-C4 sends the damage result to the Arduino through GPIO:
 
    ```text
    0 = good
    1 = damage
    ```
 
-5. **Box data storage**  
-   The Arduino stores the detected color, weight category, and damage status of the current box before making the sorting decision.
+4. **Weight measurement**  
+   The box then moves to the weight-measurement stage. The Arduino reads a 1 kg Load Cell through the HX711 module and determines the weight category.
 
-6. **Sorting decision**  
-   Boxes with an unsupported weight or a damaged condition are rejected. Other boxes are routed according to their weight category and detected color.
+5. **Final decision**  
+   The Arduino combines the color, weight, and damage results:
+   - A damaged box is sent to the rejection path.
+   - A box with a weight outside the supported range is also rejected.
+   - Other boxes are routed according to their weight category and detected color.
 
-7. **Mechanical sorting**  
+6. **Mechanical sorting**  
    DC gearbox motors move the conveyor. SG90 servo motors switch lanes or push the box into the required sorting or rejection position.
 
-8. **Cycle completion**  
-   The system completes the sorting process for the current box before the next box is placed on the conveyor.
+7. **Cycle completion**  
+   The next box should be placed on the conveyor only after the current sorting cycle is complete.
 
 ---
 
@@ -70,26 +73,28 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Start[Box Detected] --> Read[Read Color and Weight]
-    Read --> Inspect[Classify Box Condition]
+    Start[Box Detected] --> Inspect[Color and Damage Inspection]
 
-    Inspect --> Damage{Damaged?}
-    Damage -->|Yes| Reject[Send to Rejection Path]
-    Damage -->|No| Weight{Supported Weight?}
+    Inspect --> Color[Store Detected Color]
+    Inspect --> Damage[Store Damage Result]
 
-    Weight -->|No| Reject
-    Weight -->|Yes| Lane[Select Weight Lane]
+    Color --> Merge[Inspection Data Ready]
+    Damage --> Merge
 
-    Lane --> Color{Detected Color}
-    Color --> Orange[Move to Orange Position]
-    Color --> Green[Move to Green Position]
-    Color --> Yellow[Move to Yellow Position]
+    Merge --> Weight[Measure Box Weight]
+    Weight --> DamageDecision{Damaged?}
 
-    Orange --> Complete[Sorting Cycle Complete]
-    Green --> Complete
-    Yellow --> Complete
-    Reject --> Complete
+    DamageDecision -->|Yes| Reject[Send to Rejection Path]
+    DamageDecision -->|No| WeightDecision{Weight Supported?}
+
+    WeightDecision -->|No| Reject
+    WeightDecision -->|Yes| Route[Route by Weight and Color]
+
+    Reject --> Complete[Sorting Cycle Complete]
+    Route --> Complete
 ```
+
+The damage result can override the normal sorting destination. Even if the color and weight are valid, a damaged box is still rejected.
 
 ---
 
@@ -119,7 +124,7 @@ The AI model is used only for damage classification. Color and weight are measur
 ### Sensor Handling
 
 - **IR1:** interrupt-based entry detection and wake-up signal
-- **IR2–IR9:** sensor polling for box-position detection
+- **IR2–IR9:** polling-based box-position detection
 - **TCS34725:** box-color detection
 - **Load Cell + HX711:** box-weight measurement
 - **ODROID GPIO input:** damage result received by the Arduino
@@ -134,7 +139,7 @@ weight category
 damage status
 ```
 
-The stored data is used only for the current box. The next box should be added after the current sorting cycle is complete.
+These values belong to the current box and are used when the Arduino makes the final sorting decision.
 
 ### Power Management
 
@@ -166,7 +171,7 @@ The Arduino can enter power-down sleep mode when no new box is detected. The fir
 | **Embedded Programming** | Arduino, C/C++ |
 | **AI Processing** | Python, TensorFlow Lite, Teachable Machine |
 | **Controller Communication** | GPIO |
-| **Event Handling** | Interrupt and Sensor Polling |
+| **Event Handling** | Interrupts and Sensor Polling |
 | **Power Management** | Arduino Power-Down Sleep Mode |
 
 ---
@@ -214,9 +219,10 @@ This project was developed as an academic embedded-system prototype by a three-p
 It demonstrates:
 
 - Arduino and single-board computer integration
-- Sensor-based color, weight, and position detection
-- TensorFlow Lite image classification on an ODROID-C4
+- Color detection and AI-based damage classification during the same inspection stage
+- Weight measurement after the initial inspection
 - GPIO communication between controllers
+- Rejection of damaged boxes and boxes outside the supported weight range
 - Processing one box per sorting cycle
 - Motor and servo control for conveyor sorting
 - Interrupt, polling, and sleep-mode handling
